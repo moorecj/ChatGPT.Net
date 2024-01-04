@@ -1,11 +1,7 @@
-﻿using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text;
-using System.Text.Json;
-using ChatGPT.Net.DTO;
-using ChatGPT.Net.DTO.ChatGPT;
-using ChatGPT.Net.DTO.ChatGPTUnofficial;
+﻿using ChatGPT.Net.DTO.ChatGPT;
 using Newtonsoft.Json;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 
 namespace ChatGPT.Net;
 
@@ -56,13 +52,13 @@ public class ChatGpt
             Content = message
         });
     }
-    
+
     public void RemoveConversationSystemMessages(string conversationId, string message)
     {
         var conversation = GetConversation(conversationId);
         conversation.Messages = conversation.Messages.Where(x => x.Role != "system").ToList();
     }
-    
+
     public List<ChatGptConversation> GetConversations()
     {
         return Conversations;
@@ -91,7 +87,7 @@ public class ChatGpt
 
         return conversation;
     }
-    
+
     public void SetConversation(string conversationId, ChatGptConversation conversation)
     {
         var conv = Conversations.FirstOrDefault(x => x.Id == conversationId);
@@ -105,7 +101,7 @@ public class ChatGpt
             Conversations.Add(conversation);
         }
     }
-    
+
     public void RemoveConversation(string conversationId)
     {
         var conversation = Conversations.FirstOrDefault(x => x.Id == conversationId);
@@ -129,16 +125,15 @@ public class ChatGpt
         Conversations.Clear();
     }
 
-    public async Task<string> Ask(string prompt, string? conversationId = null)
+    public async Task<string> Ask(string prompt, string? conversationId = null, IEnumerable<string> imageUrls = null)
     {
         var conversation = GetConversation(conversationId);
-
         conversation.Messages.Add(new ChatGptMessage
         {
             Role = "user",
-            Content = prompt
+            Content = ToContentObject(prompt, imageUrls)
         });
-        
+
         var reply = await SendMessage(new ChatGptRequest
         {
             Messages = conversation.Messages,
@@ -148,10 +143,10 @@ public class ChatGpt
             TopP = Config.TopP,
             FrequencyPenalty = Config.FrequencyPenalty,
             PresencePenalty = Config.PresencePenalty,
-            Stop = Config.Stop,
+            Stop = IsVisionModel() ? null : Config.Stop,
             MaxTokens = Config.MaxTokens,
         });
-        
+
         conversation.Updated = DateTime.Now;
 
         var response = reply.Choices.FirstOrDefault()?.Message.Content ?? "";
@@ -159,20 +154,54 @@ public class ChatGpt
         conversation.Messages.Add(new ChatGptMessage
         {
             Role = "assistant",
-            Content = response
+            Content = ToContentObject(response.ToString())
         });
 
-        return response;
+        return response.ToString();
     }
 
-    public async Task<string> AskStream(Action<string> callback, string prompt, string? conversationId = null)
+    public async Task<string> AskImage(string prompt, string conversationId = null, IEnumerable<string> imageUrls = null)
+    {
+        var conversation = GetConversation(conversationId);
+        conversation.Messages.Add(new ChatGptMessage
+        {
+            Role = "user",
+            Content = ToContentObject(prompt, imageUrls)
+        });
+
+        var reply = await SendMessage(new ChatGptRequest
+        {
+            Messages = conversation.Messages,
+            Model = Config.Model,
+            Stream = false,
+            Temperature = Config.Temperature,
+            TopP = Config.TopP,
+            FrequencyPenalty = Config.FrequencyPenalty,
+            PresencePenalty = Config.PresencePenalty,
+            MaxTokens = Config.MaxTokens,
+        });
+
+        conversation.Updated = DateTime.Now;
+
+        var response = reply.Choices.FirstOrDefault()?.Message.Content ?? "";
+
+        conversation.Messages.Add(new ChatGptMessage
+        {
+            Role = "assistant",
+            Content = ToContentObject(response.ToString())
+        });
+
+        return response.ToString();
+    }
+
+    public async Task<string> AskStream(Action<string> callback, string prompt, string? conversationId = null, IEnumerable<string> imageUrls = null)
     {
         var conversation = GetConversation(conversationId);
 
         conversation.Messages.Add(new ChatGptMessage
         {
             Role = "user",
-            Content = prompt
+            Content = ToContentObject(prompt, imageUrls)
         });
 
         var reply = await SendMessage(new ChatGptRequest
@@ -184,7 +213,7 @@ public class ChatGpt
             TopP = Config.TopP,
             FrequencyPenalty = Config.FrequencyPenalty,
             PresencePenalty = Config.PresencePenalty,
-            Stop = Config.Stop,
+            Stop = IsVisionModel() ? null : Config.Stop, //Not compatible with vision api
             MaxTokens = Config.MaxTokens,
         }, response =>
         {
@@ -192,15 +221,16 @@ public class ChatGpt
             if (content is null) return;
             if (!string.IsNullOrWhiteSpace(content)) callback(content);
         });
-        
+
         conversation.Updated = DateTime.Now;
 
-        return reply.Choices.FirstOrDefault()?.Message.Content ?? "";
+        return reply.Choices.FirstOrDefault()?.Message.Content.ToString() ?? "";
     }
 
     public async Task<ChatGptResponse> SendMessage(ChatGptRequest requestBody, Action<ChatGptStreamChunkResponse>? callback = null)
     {
         var client = new HttpClient();
+        string bodyString = JsonConvert.SerializeObject(requestBody);
         var request = new HttpRequestMessage
         {
             Method = HttpMethod.Post,
@@ -209,7 +239,7 @@ public class ChatGpt
             {
                 {"Authorization", $"Bearer {APIKey}" }
             },
-            Content = new StringContent(JsonConvert.SerializeObject(requestBody))
+            Content = new StringContent(bodyString)
             {
                 Headers =
                 {
@@ -218,7 +248,7 @@ public class ChatGpt
             }
         };
 
-        var response = await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead);
+        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 
         response.EnsureSuccessStatusCode();
 
@@ -232,20 +262,20 @@ public class ChatGpt
             }
 
             var concatMessages = string.Empty;
-            
+
             ChatGptStreamChunkResponse? reply = null;
             var stream = await response.Content.ReadAsStreamAsync();
             await foreach (var data in StreamCompletion(stream))
             {
                 var jsonString = data.Replace("data: ", "");
                 if (string.IsNullOrWhiteSpace(jsonString)) continue;
-                if(jsonString == "[DONE]") break;
+                if (jsonString == "[DONE]") break;
                 reply = JsonConvert.DeserializeObject<ChatGptStreamChunkResponse>(jsonString);
                 if (reply is null) continue;
                 concatMessages += reply.Choices.FirstOrDefault()?.Delta.Content;
                 callback?.Invoke(reply);
             }
-            
+
             return new ChatGptResponse
             {
                 Id = reply?.Id ?? Guid.NewGuid().ToString(),
@@ -265,8 +295,37 @@ public class ChatGpt
         }
 
         var content = await response.Content.ReadFromJsonAsync<ChatGptResponse>();
-        if(content is null) throw new Exception("Unknown error");
-        if(content.Error is not null) throw new Exception(content.Error.Message);
+        if (content is null) throw new Exception("Unknown error");
+        if (content.Error is not null) throw new Exception(content.Error.Message);
         return content;
     }
+
+    private object ToContentObject(string prompt, IEnumerable<string> imageUrls = null)
+    {
+        if (IsVisionModel())
+            return prompt;
+
+        imageUrls = imageUrls ?? new List<string>();
+        List<ChatGptContent> chatGptImageContent = new List<ChatGptContent>()
+        {
+            new ChatGptContent()
+            {
+                Type = "text",
+                Text= prompt
+            }
+        };
+
+        foreach (var imageUrl in imageUrls)
+        {
+            chatGptImageContent.Add(
+                new ChatGptContent()
+                {
+                    Type = "image",
+                    ImageUrl = new ChatGptImageUrl() { Url = imageUrl }
+                });
+        }
+        return chatGptImageContent;
+    }
+
+    private bool IsVisionModel() => !Config.Model.Contains("vision");
 }

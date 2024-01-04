@@ -16,7 +16,7 @@ public partial class ChatGptRequest
     [JsonProperty("n")]
     private long N { get; set; } = 1;
 
-    [JsonProperty("stop")]
+    [JsonProperty("stop", NullValueHandling = NullValueHandling.Ignore)]
     public string[]? Stop { get; set; }
 
     [JsonProperty("top_p")]

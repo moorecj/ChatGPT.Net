@@ -8,5 +8,5 @@ public class ChatGptMessage
     public string Role { get; set; } = "user";
 
     [JsonProperty("content")]
-    public string Content { get; set; }
+    public object Content { get; set; }
 }
